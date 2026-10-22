@@ -2,6 +2,22 @@ import discord
 from discord import app_commands
 import json
 import os
+from threading import Thread
+from flask import Flask
+
+# Servidor Flask falso para que Render no tire timeout por falta de puertos web
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "EspnHaxball Bot está activo 24/7 en la nube."
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.start()
 
 # ID correcta y oficial de tu servidor de Discord
 GUILD_ID = discord.Object(id=1378906986682257408)
@@ -29,12 +45,95 @@ class HaxballBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # Sincronización instantánea con tu servidor
         self.tree.copy_global_to(guild=GUILD_ID)
         await self.tree.sync(guild=GUILD_ID)
-        print(f"Bot conectado como {self.user}. Comandos sincronizados correctamente en el servidor.")
+        print(f"Bot conectado como {self.user}. Comandos sincronizados correctamente.")
 
 bot = HaxballBot()
+
+# ==========================================
+# MODAL PARA EDITAR PLANTILLA
+# ==========================================
+class EditarPlantillaModal(discord.ui.Modal):
+    def __init__(self, club_name: str):
+        super().__init__(title=f"Editar Plantilla: {club_name[:20]}")
+        self.club_name = club_name
+        
+        self.nueva_plantilla = discord.ui.TextInput(
+            label="Nueva Plantilla de Jugadores",
+            placeholder="Jugador1, Jugador2, Jugador3...",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=2000
+        )
+        self.add_item(self.nueva_plantilla)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = load_data()
+        club = data["clubs"].get(self.club_name)
+
+        if not club:
+            await interaction.response.send_message("El club seleccionado ya no existe.", ephemeral=True)
+            return
+
+        club["plantilla"] = self.nueva_plantilla.value.strip()
+        save_data(data)
+
+        embed = discord.Embed(
+            title="Plantilla Actualizada",
+            description=f"La plantilla del club **{self.club_name}** ha sido modificada con éxito.",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Nueva Plantilla", value=club["plantilla"], inline=False)
+        embed.set_footer(text="EspnHaxball Mercadodepases System")
+
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
+# ==========================================
+# VISTA PARA SELECCIONAR QUÉ CLUB EDITAR
+# ==========================================
+class EditClubSelectView(discord.ui.View):
+    def __init__(self, clubs):
+        super().__init__()
+        options = [discord.SelectOption(label=name[:100], description=f"Editar plantilla de {name}") for name in clubs.keys()]
+        self.add_item(EditClubSelect(options))
+
+class EditClubSelect(discord.ui.Select):
+    def __init__(self, options):
+        super().__init__(placeholder="Selecciona el club a modificar...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        club_name = self.values[0]
+        await interaction.response.send_modal(EditarPlantillaModal(club_name))
+
+# ==========================================
+# MODAL PARA EL COMANDO /anuncio
+# ==========================================
+class AnuncioModal(discord.ui.Modal, title="Crear Anuncio Oficial - EspnHaxball"):
+    titulo = discord.ui.TextInput(
+        label="Título del Anuncio",
+        placeholder="Ej: 🚨 COMUNICADO OFICIAL | ESPNHAXBALL",
+        required=True,
+        max_length=150
+    )
+    contenido = discord.ui.TextInput(
+        label="Mensaje (puedes usar **negrita**, etc.)",
+        placeholder="Escribe el cuerpo del comunicado aquí...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title=self.titulo.value,
+            description=self.contenido.value,
+            color=discord.Color.from_rgb(255, 69, 0)
+        )
+        embed.set_footer(text="EspnHaxball Official System • Publicado por " + interaction.user.display_name, icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
+
+        await interaction.channel.send(embed=embed)
+        await interaction.response.send_message("¡Anuncio publicado correctamente en el canal!", ephemeral=True)
 
 # ==========================================
 # MODAL PARA /registrar-club
@@ -203,9 +302,21 @@ class AddTorneoView(discord.ui.View):
 # COMANDOS DE SLASH
 # ==========================================
 
-@bot.tree.command(name="anuncios", description="Comando de anuncios de EspnHaxball")
-async def anuncios(interaction: discord.Interaction):
-    await interaction.response.send_message("Canal de anuncios oficial de EspnHaxball activo.", ephemeral=False)
+@bot.tree.command(name="anuncio", description="Crea un comunicado oficial con formato para el canal")
+@app_commands.checks.has_permissions(administrator=True)
+async def anuncio(interaction: discord.Interaction):
+    await interaction.response.send_modal(AnuncioModal())
+
+@bot.tree.command(name="editar-plantilla", description="Modifica la plantilla de jugadores de un club oficial")
+@app_commands.checks.has_permissions(administrator=True)
+async def editar_plantilla(interaction: discord.Interaction):
+    data = load_data()
+    if not data["clubs"]:
+        await interaction.response.send_message("No hay clubes registrados para editar.", ephemeral=True)
+        return
+    
+    view = EditClubSelectView(data["clubs"])
+    await interaction.response.send_message("Seleccione el club al que desea cambiarle la plantilla:", view=view, ephemeral=True)
 
 @bot.tree.command(name="mercado-de-pases", description="Consulta el mercado de pases actual")
 async def mercado_de_pases(interaction: discord.Interaction):
@@ -255,6 +366,8 @@ async def add_torneo(interaction: discord.Interaction):
     view = AddTorneoView(data["clubs"], data["tournaments"])
     await interaction.response.send_message("Seleccione el club y el torneo a vincular:", view=view, ephemeral=True)
 
+@anuncio.error
+@editar_plantilla.error
 @registrar_club.error
 @registrar_torneo.error
 @add_torneo.error
@@ -265,6 +378,8 @@ async def admin_error(interaction: discord.Interaction, error):
         await interaction.response.send_message(f"Se ha producido un error: {error}", ephemeral=True)
 
 if __name__ == "__main__":
+    keep_alive()
+    
     TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
         print("Error: No se ha configurado la variable de entorno DISCORD_TOKEN.")
